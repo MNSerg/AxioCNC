@@ -162,20 +162,31 @@ if (fs.existsSync(vendorMediamtxPath) && mediamtxPlatform) {
   console.log('   No vendor/mediamtx found, skipping filter');
 }
 
-// Rebuild native modules for Electron (bundle only; app has no native deps)
-console.log('🔧 Rebuilding native modules for Electron...');
-// Path must be dynamic so it works from repo root regardless of cwd
-// eslint-disable-next-line import/no-dynamic-require
-const desktopPkg = require(path.join(repoRoot, 'apps', 'desktop', 'package.json'));
-const electronVersion = desktopPkg.devDependencies?.electron;
-if (!electronVersion) {
-  console.error('❌ Missing electron in apps/desktop devDependencies');
-  process.exit(1);
+// Rebuild native modules for Electron (bundle only; app has no native deps).
+// Cross-packaging (for example a Windows installer from Linux) must not
+// compile host binaries: serialport ships N-API prebuilds and picks the
+// target OS at runtime. A host rebuild would leave a Linux .node that
+// Windows tries to load first.
+const hostPlatform = process.platform === 'win32' ? 'win' : process.platform === 'darwin' ? 'mac' : 'linux';
+const samePlatform = hostPlatform === platform && process.arch === arch;
+if (!samePlatform) {
+  console.log(`⏭️  Cross-packaging ${platform}-${arch} from ${hostPlatform}-${process.arch}.`);
+  console.log('   Keeping N-API prebuilds so the target OS loads its own binary.');
+} else {
+  console.log('🔧 Rebuilding native modules for Electron...');
+  // Path must be dynamic so it works from repo root regardless of cwd
+  // eslint-disable-next-line import/no-dynamic-require
+  const desktopPkg = require(path.join(repoRoot, 'apps', 'desktop', 'package.json'));
+  const electronVersion = desktopPkg.devDependencies?.electron;
+  if (!electronVersion) {
+    console.error('❌ Missing electron in apps/desktop devDependencies');
+    process.exit(1);
+  }
+  run('npx', ['@electron/rebuild', '--version', electronVersion, '--module-dir', bundleRoot, '--force'], {
+    cwd: repoRoot,
+  });
+  console.log('✅ Native modules rebuilt');
 }
-run('npx', ['@electron/rebuild', '--version', electronVersion, '--module-dir', bundleRoot, '--force'], {
-  cwd: repoRoot,
-});
-console.log('✅ Native modules rebuilt');
 
 // Prepare app staging dir: deploy desktop (full prod node_modules) + copy dist.
 // We use this as projectDir and beforeBuild→false so electron-builder skips its
