@@ -1,10 +1,10 @@
 import React, { useCallback, useRef, useState } from 'react'
 import { useTranslation } from 'react-i18next'
-import { Upload, FileCode, Circle, Loader2, X, ClipboardList } from 'lucide-react'
+import { Upload, FileCode, Circle, Loader2, X, ClipboardList, PenLine } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { OverlayScrollbarsComponent } from 'overlayscrollbars-react'
 import 'overlayscrollbars/overlayscrollbars.css'
-import { useGetWorkfilesQuery, useUploadWorkfileMutation, useLazyGetWorkfileContentQuery, useGetControllersQuery, useGetGcodeQuery } from '@/services/api'
+import { useGetWorkfilesQuery, useUploadWorkfileMutation, useLazyGetWorkfileContentQuery, useGetControllersQuery, useGetGcodeQuery, useGetSettingsQuery, useSetSettingsMutation } from '@/services/api'
 import { socketService } from '@/services/socket'
 import { runGcodeBatch } from '@/utils/runGcodeBatch'
 import { calculateOutline } from '@/lib/gcodeOutline'
@@ -13,13 +13,26 @@ import { ConfirmationDialog } from '@/components/ConfirmationDialog'
 import type { PanelProps } from '../types'
 import { MachineActionButton } from '@/components/MachineActionButton'
 import { ActionRequirements } from '@/utils/machineState'
+import { centerline, vectorize, type Raster } from '@/plotter/BitmapTrace'
+import { configFromStored, isPlotterGCode, toStored } from '@/plotter/PlotterConfig'
+import { pathsToJob, vectorTextToJob } from '@/plotter'
+import { convert, withBorderSpeed } from '@/plotter/PlotterPipeline'
+import { num } from '@/plotter/PlotGeom'
+import { plotterText } from '@/plotter/plotterText'
+import { contourJobName, fileExtension, imageFileToRaster, isImageExtension, isVectorExtension, plotterJobName } from '@/plotter/imageFile'
+import { PlotterImportDialog, type PlotterImageMode } from './PlotterImportDialog'
+
+type PendingImport =
+  | { kind: 'dxf' | 'svg'; name: string; text: string }
+  | { kind: 'image'; name: string; raster: Raster }
 
 export interface FilePanelProps extends PanelProps {
   onSetUpJob?: () => void
 }
 
 export function FilePanel({ isConnected, connectedPort: connectedPortProp, onFlashStatus, machinePosition, machineStatus, onSetUpJob }: FilePanelProps) {
-  const { t } = useTranslation()
+  const { t, i18n } = useTranslation()
+  const tr = (english: string, russian: string) => plotterText(i18n.language, english, russian)
   // Get connected port from controllers (may be null if not connected)
   const { data: controllers } = useGetControllersQuery()
   const connectedPort = connectedPortProp || controllers?.[0]?.port || null
@@ -33,9 +46,19 @@ export function FilePanel({ isConnected, connectedPort: connectedPortProp, onFla
   const outliningStartedRef = useRef(false)
   const [getWorkfileContent] = useLazyGetWorkfileContentQuery()
   const { showErrorNotification, showInfoNotification } = useNotifications()
+  const { data: settings } = useGetSettingsQuery()
+  const [setSettings] = useSetSettingsMutation()
+  const [importOpen, setImportOpen] = useState(false)
+  const [pendingImport, setPendingImport] = useState<PendingImport | null>(null)
+  const [importSpeed, setImportSpeed] = useState(600)
+  const [importWidth, setImportWidth] = useState(100)
+  const [importMode, setImportMode] = useState<PlotterImageMode>('vectorize')
+  const [showApplyPlotter, setShowApplyPlotter] = useState(false)
+  const [isApplyingPlotter, setIsApplyingPlotter] = useState(false)
 
   const { data: workfilesData, isLoading: isLoadingFiles } = useGetWorkfilesQuery()
   const [uploadWorkfile] = useUploadWorkfileMutation()
+  const plotterCfg = configFromStored(settings?.plotter).cfg
 
   const files = workfilesData?.files || []
 
@@ -59,9 +82,57 @@ export function FilePanel({ isConnected, connectedPort: connectedPortProp, onFla
     // If query is skipped (no connectedPort), preserve existing state
   }, [gcodeData])
 
-  // Handle file upload (from file picker or drag-drop)
+  const openImport = useCallback((pending: PendingImport) => {
+    setImportSpeed(plotterCfg.enabled ? plotterCfg.cutSpeed : 1000)
+    setPendingImport(pending)
+    setImportOpen(true)
+  }, [plotterCfg.cutSpeed, plotterCfg.enabled])
+
+  const sendLoadedGcode = useCallback(async (name: string, gcode: string) => {
+    if (!isConnected || !connectedPort) return
+    const token = localStorage.getItem('axiocnc-token')
+    const response = await fetch('/api/gcode', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': token ? `Bearer ${token}` : '',
+      },
+      body: JSON.stringify({
+        port: connectedPort,
+        name,
+        gcode,
+        context: {},
+      }),
+    })
+    if (!response.ok) {
+      const error = await response.json()
+      throw new Error(error.msg || t('Failed to load file'))
+    }
+    setLoadedFileName(name)
+  }, [isConnected, connectedPort, t])
+
+  // Handle file upload (from file picker or drag-drop).
+  // G-code files stay on the existing upload path. DXF, SVG and images are imported.
   const handleFileUpload = useCallback(async (file: File) => {
     if (!file.name) return
+    const ext = fileExtension(file.name)
+
+    if (isImageExtension(ext)) {
+      setIsUploading(true)
+      try {
+        const image = await imageFileToRaster(file)
+        const width = Math.max(10, Math.round(Math.max(image.pixelWidth, image.pixelHeight) / 10))
+        setImportWidth(width)
+        setImportMode('vectorize')
+        openImport({ kind: 'image', name: file.name, raster: image.raster })
+      } catch (error) {
+        console.error('Failed to read image:', error)
+        showErrorNotification(tr('Plotter', 'Плоттер'), tr('Could not read the image', 'Не удалось прочитать изображение'))
+      } finally {
+        setIsUploading(false)
+      }
+      return
+    }
 
     setIsUploading(true)
     
@@ -75,10 +146,15 @@ export function FilePanel({ isConnected, connectedPort: connectedPortProp, onFla
             throw new Error(t('Failed to read file'))
           }
 
+          if (isVectorExtension(ext)) {
+            openImport({ kind: ext === 'dxf' ? 'dxf' : 'svg', name: file.name, text: result })
+            return
+          }
+
           await uploadWorkfile({ name: file.name, gcode: result }).unwrap()
         } catch (error) {
           console.error('Failed to upload file:', error)
-          // TODO: Show error toast
+          showErrorNotification(t('Failed to load file'), error instanceof Error ? error.message : t('Failed to read file'))
         } finally {
           setIsUploading(false)
         }
@@ -94,7 +170,107 @@ export function FilePanel({ isConnected, connectedPort: connectedPortProp, onFla
       console.error('Failed to process file:', error)
       setIsUploading(false)
     }
-  }, [uploadWorkfile, t])
+  }, [openImport, showErrorNotification, t, tr, uploadWorkfile])
+
+  const handleImportConfirm = useCallback(async () => {
+    if (!pendingImport) return
+    const pending = pendingImport
+    setImportOpen(false)
+    setIsUploading(true)
+    try {
+      const cfg = configFromStored(settings?.plotter).cfg
+      let gcode: string
+      if (pending.kind === 'image') {
+        const paths = importMode === 'centerline'
+          ? centerline(pending.raster, importWidth)
+          : vectorize(pending.raster, importWidth)
+        gcode = pathsToJob(paths, cfg, importSpeed)
+      } else {
+        gcode = vectorTextToJob(pending.text, pending.kind, cfg, importSpeed)
+      }
+      if ((cfg.enabled && gcode.indexOf('paths 0') >= 0) || gcode.indexOf('X') < 0) {
+        showErrorNotification(
+          tr('Plotter', 'Плоттер'),
+          tr('No contours found in this file.', 'В файле нет контуров.'),
+        )
+        return
+      }
+      if (cfg.enabled && importSpeed > 0) {
+        try {
+          await setSettings({ plotter: toStored(withBorderSpeed(cfg, importSpeed)) }).unwrap()
+        } catch (error) {
+          console.error('Failed to save plotter cut speed:', error)
+        }
+      }
+      const name = cfg.enabled ? plotterJobName(pending.name) : contourJobName(pending.name)
+      await uploadWorkfile({ name, gcode }).unwrap()
+      showInfoNotification(
+        tr('Plotter', 'Плоттер'),
+        tr('Saved {{name}}', 'Сохранён {{name}}').replace('{{name}}', name),
+      )
+    } catch (error) {
+      console.error('Failed to import plotter file:', error)
+      showErrorNotification(
+        tr('Plotter', 'Плоттер'),
+        error instanceof Error ? error.message : tr('Could not build the toolpath', 'Не удалось построить траекторию'),
+      )
+    } finally {
+      setIsUploading(false)
+      setPendingImport(null)
+    }
+  }, [importMode, importSpeed, importWidth, pendingImport, setSettings, settings?.plotter, showErrorNotification, showInfoNotification, tr, uploadWorkfile])
+
+  const performApplyPlotter = useCallback(async () => {
+    if (!loadedFileName || isApplyingPlotter) return
+    setIsApplyingPlotter(true)
+    try {
+      let source = gcodeData?.data || gcodeData?.gcode || ''
+      if (!source) {
+        const result = await getWorkfileContent(loadedFileName).unwrap()
+        source = result.gcode || ''
+      }
+      if (!source) {
+        throw new Error(t('G-code content is empty'))
+      }
+      if (isPlotterGCode(source)) {
+        showErrorNotification(
+          tr('Plotter', 'Плоттер'),
+          tr(
+            'This file is already a drag-knife path. The holder path cannot be used as a new drawing.',
+            'Этот файл уже содержит путь ножа. Путь оси нельзя принимать за новый рисунок.',
+          ),
+        )
+        return
+      }
+      const cfg = configFromStored(settings?.plotter).cfg
+      const gcode = convert(source, cfg)
+      if (gcode.indexOf('paths 0') >= 0) {
+        showErrorNotification(
+          tr('Plotter', 'Плоттер'),
+          tr(
+            'No cutting moves found. Open a DXF or SVG, or a G-code file with spindle-on G1 moves.',
+            'Нет режущих ходов. Откройте DXF или SVG, либо G-code с ходами G1 при включённом шпинделе.',
+          ),
+        )
+        return
+      }
+      const name = plotterJobName(loadedFileName)
+      await uploadWorkfile({ name, gcode }).unwrap()
+      await sendLoadedGcode(name, gcode)
+      showInfoNotification(
+        tr('Plotter', 'Плоттер'),
+        tr('Saved {{name}}', 'Сохранён {{name}}').replace('{{name}}', name),
+      )
+    } catch (error) {
+      console.error('Failed to apply plotter:', error)
+      showErrorNotification(
+        tr('Plotter', 'Плоттер'),
+        error instanceof Error ? error.message : tr('Could not build the toolpath', 'Не удалось построить траекторию'),
+      )
+    } finally {
+      setIsApplyingPlotter(false)
+    }
+  }, [gcodeData, getWorkfileContent, isApplyingPlotter, loadedFileName, sendLoadedGcode, settings?.plotter, showErrorNotification, showInfoNotification, t, tr, uploadWorkfile])
 
   // Handle file picker click
   const handleFilePickerClick = useCallback(() => {
@@ -368,7 +544,7 @@ export function FilePanel({ isConnected, connectedPort: connectedPortProp, onFla
         <input
           ref={fileInputRef}
           type="file"
-          accept=".nc,.gcode,.cnc,.tap"
+          accept=".nc,.gcode,.cnc,.tap,.dxf,.svg,.png,.jpg,.jpeg,.gif,.bmp,.webp"
           className="hidden"
           onChange={handleFileInputChange}
           disabled={isUploading}
@@ -383,6 +559,9 @@ export function FilePanel({ isConnected, connectedPort: connectedPortProp, onFla
             <Upload className="w-8 h-8 mx-auto text-muted-foreground mb-2" />
             <div className="text-sm text-muted-foreground">
               {t('Drop G-code file or click to browse')}
+            </div>
+            <div className="text-xs text-muted-foreground mt-1">
+              {tr('DXF, SVG, PNG, JPG and BMP open as contours', 'DXF, SVG, PNG, JPG и BMP открываются как контуры')}
             </div>
           </>
         )}
@@ -431,6 +610,36 @@ export function FilePanel({ isConnected, connectedPort: connectedPortProp, onFla
                     {t('Set up job')}
                   </MachineActionButton>
                 )}
+                <Button
+                  variant="outline"
+                  className="w-full"
+                  size="sm"
+                  disabled={isApplyingPlotter || !loadedFileName}
+                  onClick={() => {
+                    const source = gcodeData?.data || gcodeData?.gcode || ''
+                    if (source && isPlotterGCode(source)) {
+                      showErrorNotification(
+                        tr('Plotter', 'Плоттер'),
+                        tr(
+                          'This file is already a drag-knife path. The holder path cannot be used as a new drawing.',
+                          'Этот файл уже содержит путь ножа. Путь оси нельзя принимать за новый рисунок.',
+                        ),
+                      )
+                      return
+                    }
+                    setShowApplyPlotter(true)
+                  }}
+                >
+                  {isApplyingPlotter ? (
+                    <>
+                      <Loader2 className="w-4 h-4 mr-1 animate-spin" /> {tr('Plotter', 'Плоттер')}
+                    </>
+                  ) : (
+                    <>
+                      <PenLine className="w-4 h-4 mr-1" /> {tr('Apply plotter to loaded file', 'Применить плоттер к загруженному файлу')}
+                    </>
+                  )}
+                </Button>
                 <Button 
                   variant="outline" 
                   className="w-full" 
@@ -531,6 +740,36 @@ export function FilePanel({ isConnected, connectedPort: connectedPortProp, onFla
           </div>
         </OverlayScrollbarsComponent>
       </div>
+
+      <PlotterImportDialog
+        open={importOpen}
+        kind={pendingImport?.kind ?? 'dxf'}
+        plotterEnabled={plotterCfg.enabled}
+        speed={importSpeed}
+        widthMm={importWidth}
+        mode={importMode}
+        onSpeed={setImportSpeed}
+        onWidth={setImportWidth}
+        onMode={setImportMode}
+        onOpenChange={(open) => {
+          setImportOpen(open)
+          if (!open) setPendingImport(null)
+        }}
+        onConfirm={handleImportConfirm}
+      />
+
+      <ConfirmationDialog
+        open={showApplyPlotter}
+        onOpenChange={setShowApplyPlotter}
+        title={tr('Plotter', 'Плоттер')}
+        description={tr(
+          'Rebuild the loaded toolpath for the drag knife? Blade offset ' + num(plotterCfg.bladeOffsetMm) + ' mm. Do not run this twice on the same file.',
+          'Перестроить загруженную траекторию под нож? Смещение лезвия ' + num(plotterCfg.bladeOffsetMm) + ' мм. Не запускайте это дважды для одного и того же файла.',
+        )}
+        confirmLabel={tr('Apply', 'Применить')}
+        cancelLabel={tr('Cancel', 'Отмена')}
+        onConfirm={performApplyPlotter}
+      />
 
       {/* Outline confirmation dialog */}
       <ConfirmationDialog

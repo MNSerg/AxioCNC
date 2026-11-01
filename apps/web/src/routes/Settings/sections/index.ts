@@ -33,4 +33,5 @@ export type { Tool } from './ToolLibrarySection'
 export { AdvancedSection } from './AdvancedSection'
 export type { AdvancedConfig } from './AdvancedSection'
 export { AboutSection } from './AboutSection'
+export { PlotterSection } from './PlotterSection'
 
