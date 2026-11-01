@@ -1,6 +1,7 @@
 import React from 'react'
 import { useTranslation } from 'react-i18next'
-import { Settings, Palette, Gamepad2, Box, Zap, Info, Camera, Target, Plug, Code, Route, Wrench, Settings2 } from 'lucide-react'
+import { Settings, Palette, Gamepad2, Box, Zap, Info, Camera, Target, Plug, Code, Route, Wrench, Settings2, PenLine } from 'lucide-react'
+import { plotterText } from '@/plotter/plotterText'
 
 export interface SettingsSection {
   id: string
@@ -9,13 +10,14 @@ export interface SettingsSection {
 }
 
 export function useSettingsSections(): SettingsSection[] {
-  const { t } = useTranslation()
+  const { t, i18n } = useTranslation()
   
   return [
     { id: 'general', label: t('General'), icon: <Settings className="w-4 h-4" /> },
     { id: 'appearance', label: t('Appearance'), icon: <Palette className="w-4 h-4" /> },
     { id: 'connection', label: t('Connection'), icon: <Plug className="w-4 h-4" /> },
     { id: 'machine', label: t('Machine'), icon: <Box className="w-4 h-4" /> },
+    { id: 'plotter', label: plotterText(i18n.language, 'Plotter', 'Плоттер'), icon: <PenLine className="w-4 h-4" /> },
     { id: 'zeroing-methods', label: t('Zeroing Methods'), icon: <Target className="w-4 h-4" /> },
     { id: 'zeroing-strategies', label: t('Zeroing defaults'), icon: <Route className="w-4 h-4" /> },
     { id: 'camera', label: t('Camera'), icon: <Camera className="w-4 h-4" /> },

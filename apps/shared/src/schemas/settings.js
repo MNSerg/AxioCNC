@@ -226,6 +226,75 @@ export const FirstUseSettingsSchema = z.object({
 });
 
 // =============================================================================
+// Plotter / drag knife
+// Defaults match LaserGRBL PlotterConfig.CreateDefault.
+// =============================================================================
+
+const plotterDefaults = {
+  schema: 3,
+  enabled: false,
+  preset: 'Rubber',
+  bladeName: 'Rubber 3.60',
+  bladeOffsetMm: 3.6,
+  overcutMm: 3.6,
+  leadInMm: 3.6,
+  cornerThresholdDeg: 8,
+  liftAngleDeg: 0,
+  simplifyMm: 0.05,
+  minSegmentMm: 0.02,
+  cutSpeed: 600,
+  travelSpeed: 0,
+  plungeSpeed: 300,
+  dwellDownMs: 0,
+  dwellUpMs: 0,
+  penMode: 'Manual',
+  servoUp: 0,
+  servoDown: 255,
+  penUpZ: 5,
+  penDownZ: 0,
+  optimizeOrder: true,
+  insideFirst: true,
+  passes: 1,
+  linearizeArcs: false,
+  arcStepDeg: 10,
+  startMarginMm: 20,
+  laserOffsetX: 10,
+  laserOffsetY: 0,
+};
+
+export const PlotterSettingsSchema = z.object({
+  schema: z.number().default(3),
+  enabled: z.boolean().default(false),
+  preset: z.enum(['Custom', 'Pen', 'VinylFine', 'Craft', 'Deep', 'Rubber']).default('Rubber'),
+  bladeName: z.string().default('Rubber 3.60'),
+  bladeOffsetMm: z.number().default(3.6),
+  overcutMm: z.number().default(3.6),
+  leadInMm: z.number().default(3.6),
+  cornerThresholdDeg: z.number().default(8),
+  liftAngleDeg: z.number().default(0),
+  simplifyMm: z.number().default(0.05),
+  minSegmentMm: z.number().default(0.02),
+  cutSpeed: z.number().default(600),
+  travelSpeed: z.number().default(0),
+  plungeSpeed: z.number().default(300),
+  dwellDownMs: z.number().default(0),
+  dwellUpMs: z.number().default(0),
+  penMode: z.enum(['ServoPwm', 'Digital', 'ZAxis', 'Manual']).default('Manual'),
+  servoUp: z.number().default(0),
+  servoDown: z.number().default(255),
+  penUpZ: z.number().default(5),
+  penDownZ: z.number().default(0),
+  optimizeOrder: z.boolean().default(true),
+  insideFirst: z.boolean().default(true),
+  passes: z.number().default(1),
+  linearizeArcs: z.boolean().default(false),
+  arcStepDeg: z.number().default(10),
+  startMarginMm: z.number().default(20),
+  laserOffsetX: z.number().default(10),
+  laserOffsetY: z.number().default(0),
+}).default(plotterDefaults);
+
+// =============================================================================
 // Complete System Settings Schema
 // =============================================================================
 
@@ -261,6 +330,9 @@ export const SystemSettingsSchema = z.object({
 
   // First-use settings
   firstUse: FirstUseSettingsSchema.default({}),
+
+  // Drag-knife plotter. Missing values keep CreateDefault.
+  plotter: PlotterSettingsSchema,
 });
 
 // =============================================================================
@@ -284,6 +356,7 @@ export const getDefaultSettings = () => {
     joystick: JoystickSettingsSchema.parse({}),
     appearance: AppearanceSettingsSchema.parse({}),
     firstUse: FirstUseSettingsSchema.parse({}),
+    plotter: PlotterSettingsSchema.parse({}),
   };
   
   // Then parse through the full schema to ensure all top-level defaults are applied

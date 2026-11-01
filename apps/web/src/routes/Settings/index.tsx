@@ -55,6 +55,7 @@ import {
   ToolLibrarySection,
   AdvancedSection,
   AboutSection,
+  PlotterSection,
   type MachineConfig,
   type ConnectionConfig,
   type CameraConfig,
@@ -1924,6 +1925,8 @@ export default function Settings() {
               config={machineConfig}
               onConfigChange={handleMachineConfigChange}
             />
+
+            <PlotterSection />
 
             <ZeroingMethodsSection
               config={zeroingMethodsConfig}
